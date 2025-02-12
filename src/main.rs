@@ -378,6 +378,7 @@ impl ManifestReader {
                             }
                         }
                     }
+                    edits.push(VersionEdit::NewFile4(meta));
                 }
                 200 => {
                     // kColumnFamily
