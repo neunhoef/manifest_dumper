@@ -1,7 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use crc32c::crc32c;
 use std::fs::File;
-use std::io::{self, BufReader, Cursor, Read};
+use std::io::{self, BufReader, Cursor, Read, Seek};
 use std::path::Path;
 
 const ZERO_TYPE: u8 = 0;
@@ -182,7 +182,7 @@ impl ManifestReader {
     }
 
     fn read_record(&mut self) -> io::Result<Option<Vec<VersionEdit>>> {
-        let mut whole_payload : Vec<u8> = Vec::new();
+        let mut whole_payload: Vec<u8> = Vec::new();
         loop {
             // Read the 7-byte header
             let mut header = [0u8; 7]; // 4 (crc) + 2 (size) + 1 (type)
@@ -210,31 +210,32 @@ impl ManifestReader {
 
             if actual_crc != expected_crc {
                 eprintln!(
-                    "CRC mismatch: expected {:x}, got {:x}",
-                    expected_crc, actual_crc
+                    "CRC mismatch: expected {:x}, got {:x}, current offset in file: {}, size of last payload: {}",
+                    expected_crc, actual_crc, self.reader.stream_position().unwrap(),
+                    size,
                 );
             }
             match record_type {
                 FULL_TYPE => {
                     whole_payload = payload;
                     break;
-                },
+                }
                 FIRST_TYPE => {
                     whole_payload = payload;
-                },
+                }
                 MIDDLE_TYPE => {
                     whole_payload.extend_from_slice(&payload);
-                },
+                }
                 LAST_TYPE => {
                     whole_payload.extend_from_slice(&payload);
                     break;
-                },
+                }
                 ZERO_TYPE | _ => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         format!("Unexpected record type: {}", record_type),
                     ));
-                },
+                }
             }
         }
 
