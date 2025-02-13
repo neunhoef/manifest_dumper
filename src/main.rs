@@ -10,6 +10,9 @@ const FIRST_TYPE: u8 = 2;
 const MIDDLE_TYPE: u8 = 3;
 const LAST_TYPE: u8 = 4;
 
+const BLOCK_SIZE: u64 = 0x8000;
+const HEADER_SIZE: u64 = 7;
+
 #[derive(Debug)]
 enum Tag {
     Comparator = 1,
@@ -188,6 +191,13 @@ impl ManifestReader {
     fn read_record(&mut self) -> io::Result<Option<Vec<VersionEdit>>> {
         let mut whole_payload: Vec<u8> = Vec::new();
         loop {
+            let mut left_in_block = BLOCK_SIZE - (self.reader.stream_position().unwrap() % BLOCK_SIZE);
+            if left_in_block < HEADER_SIZE {
+                let mut buf = vec!(0u8; left_in_block as usize);
+                let _ = self.reader.read_exact(&mut buf);
+                left_in_block = BLOCK_SIZE;
+            }
+
             // Read the 7-byte header
             let mut header = [0u8; 7]; // 4 (crc) + 2 (size) + 1 (type)
             match self.reader.read_exact(&mut header) {
@@ -197,10 +207,17 @@ impl ManifestReader {
             }
 
             // Parse header
-            let expected_crc = unmask_crc((&header[0..4]).read_u32::<LittleEndian>()?);
+            let mut expected_crc = (&header[0..4]).read_u32::<LittleEndian>()?;
             let size = (&header[4..6]).read_u16::<LittleEndian>()? as usize;
             let record_type = header[6]; // Should be 1
 
+            // All zero?
+            if expected_crc == 0 && size == 0 && record_type == 0 {
+                let mut buf = vec![0u8; left_in_block as usize];
+                let _ = self.reader.read_exact(&mut buf);
+            }
+
+            expected_crc = unmask_crc(expected_crc);
             // Read the payload
             let mut payload = vec![0u8; size];
             self.reader.read_exact(&mut payload)?;
