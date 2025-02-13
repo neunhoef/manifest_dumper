@@ -181,6 +181,10 @@ impl ManifestReader {
         })
     }
 
+    fn position(&mut self) -> u64 {
+        self.reader.stream_position().unwrap()
+    }
+
     fn read_record(&mut self) -> io::Result<Option<Vec<VersionEdit>>> {
         let mut whole_payload: Vec<u8> = Vec::new();
         loop {
@@ -467,8 +471,11 @@ fn main() -> io::Result<()> {
 
     let mut reader = ManifestReader::new(manifest_path)?;
 
+    let mut pos : u64 = 0;
     while let Some(edit) = reader.read_record()? {
-        println!("{:?}", edit);
+        let newpos = reader.position();
+        println!("{:x} {:x} {:?}", pos, newpos - pos, edit);
+        pos = newpos;
     }
 
     Ok(())
