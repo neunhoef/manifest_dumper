@@ -4,11 +4,11 @@ use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read};
 use std::path::Path;
 
-const _ZERO_TYPE: u8 = 0;
+const ZERO_TYPE: u8 = 0;
 const FULL_TYPE: u8 = 1;
-const _FIRST_TYPE: u8 = 2;
-const _MIDDLE_TYPE: u8 = 3;
-const _LAST_TYPE: u8 = 4;
+const FIRST_TYPE: u8 = 2;
+const MIDDLE_TYPE: u8 = 3;
+const LAST_TYPE: u8 = 4;
 
 #[derive(Debug)]
 enum Tag {
@@ -182,46 +182,65 @@ impl ManifestReader {
     }
 
     fn read_record(&mut self) -> io::Result<Option<Vec<VersionEdit>>> {
-        // Read the 7-byte header
-        let mut header = [0u8; 7]; // 4 (crc) + 2 (size) + 1 (type)
-        match self.reader.read_exact(&mut header) {
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-            Err(e) => return Err(e),
-        }
+        let mut whole_payload : Vec<u8> = Vec::new();
+        loop {
+            // Read the 7-byte header
+            let mut header = [0u8; 7]; // 4 (crc) + 2 (size) + 1 (type)
+            match self.reader.read_exact(&mut header) {
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(e),
+            }
 
-        // Parse header
-        let expected_crc = unmask_crc((&header[0..4]).read_u32::<LittleEndian>()?);
-        let size = (&header[4..6]).read_u16::<LittleEndian>()? as usize;
-        let record_type = header[6]; // Should be 1
+            // Parse header
+            let expected_crc = unmask_crc((&header[0..4]).read_u32::<LittleEndian>()?);
+            let size = (&header[4..6]).read_u16::<LittleEndian>()? as usize;
+            let record_type = header[6]; // Should be 1
 
-        if record_type != FULL_TYPE {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Unexpected record type: {}", record_type),
-            ));
-        }
+            // Read the payload
+            let mut payload = vec![0u8; size];
+            self.reader.read_exact(&mut payload)?;
 
-        // Read the payload
-        let mut payload = vec![0u8; size];
-        self.reader.read_exact(&mut payload)?;
+            // Verify CRC
+            // Create data for CRC calculation: type byte + payload
+            let mut data_for_crc = Vec::with_capacity(1 + size);
+            data_for_crc.push(record_type); // The type byte
+            data_for_crc.extend_from_slice(&payload);
+            let actual_crc = crc32c(&data_for_crc);
 
-        // Verify CRC
-        // Create data for CRC calculation: type byte + payload
-        let mut data_for_crc = Vec::with_capacity(1 + size);
-        data_for_crc.push(record_type); // The type byte
-        data_for_crc.extend_from_slice(&payload);
-        let actual_crc = crc32c(&data_for_crc);
-
-        if actual_crc != expected_crc {
-            eprintln!(
-                "CRC mismatch: expected {:x}, got {:x}",
-                expected_crc, actual_crc
-            );
+            if actual_crc != expected_crc {
+                eprintln!(
+                    "CRC mismatch: expected {:x}, got {:x}",
+                    expected_crc, actual_crc
+                );
+            }
+            match record_type {
+                FULL_TYPE => {
+                    whole_payload = payload;
+                    break;
+                },
+                FIRST_TYPE => {
+                    whole_payload = payload;
+                },
+                MIDDLE_TYPE => {
+                    whole_payload.extend_from_slice(&payload);
+                },
+                LAST_TYPE => {
+                    whole_payload.extend_from_slice(&payload);
+                    break;
+                },
+                ZERO_TYPE | _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Unexpected record type: {}", record_type),
+                    ));
+                },
+            }
         }
 
         // Create a cursor to read from the payload
-        let mut cursor = std::io::Cursor::new(payload);
+        let size = whole_payload.len();
+        let mut cursor = std::io::Cursor::new(whole_payload);
         let mut edits = Vec::new();
 
         // Read all items from the payload
