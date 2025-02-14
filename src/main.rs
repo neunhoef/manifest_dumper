@@ -35,12 +35,46 @@ enum Tag {
     // ... other tags can be added as needed
 }
 
+impl TryFrom<u8> for Tag {
+    type Error = &'static str;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Tag::Comparator),
+            2 => Ok(Tag::LogNumber),
+            3 => Ok(Tag::NextFileNumber),
+            4 => Ok(Tag::LastSequence),
+            5 => Ok(Tag::CompactCursor),
+            6 => Ok(Tag::DeletedFile),
+            7 => Ok(Tag::NewFile),
+            9 => Ok(Tag::PrevLogNumber),
+            10 => Ok(Tag::MinLogNumberToKeep),
+            100 => Ok(Tag::NewFile2),
+            102 => Ok(Tag::NewFile3),
+            103 => Ok(Tag::NewFile4),
+            200 => Ok(Tag::ColumnFamily),
+            201 => Ok(Tag::ColumnFamilyAdd),
+            202 => Ok(Tag::ColumnFamilyDrop),
+            203 => Ok(Tag::MaxColumnFamily),
+            _ => Err("Invalid tag value"),
+        }
+    }
+}
+
+impl From<Tag> for u8 {
+    fn from(tag: Tag) -> u8 {
+        tag as u8
+    }
+}
+
 #[derive(Debug)]
+#[allow(dead_code)]
 struct InternalKey {
     data: Vec<u8>, // For now we just store raw bytes
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 struct FileMetaData {
     level: u32,
     file_number: u64,
@@ -64,6 +98,8 @@ struct FileMetaData {
     compensated_range_deletion_size: u64,
     tail_size: u64,
     user_defined_timestamps_persisted: bool,
+    min_timestamp: Option<Vec<u8>>, // Store as raw bytes
+    max_timestamp: Option<Vec<u8>>, // Store as raw bytes
 }
 
 impl Default for FileMetaData {
@@ -90,6 +126,8 @@ impl Default for FileMetaData {
             compensated_range_deletion_size: 0,
             tail_size: 0,
             user_defined_timestamps_persisted: true, // Default is true
+            min_timestamp: None,
+            max_timestamp: None,
         }
     }
 }
@@ -108,9 +146,44 @@ enum NewFileCustomTag {
     MaxTimestamp = 11,
     UniqueId = 12,
     EpochNumber = 13,
+    CompensateRangeDeletionSize = 14,
+    TailSize = 15,
+    UserDefinedTimestampsPersisted = 16,
 }
 
+impl TryFrom<u32> for NewFileCustomTag {
+    type Error = &'static str;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(NewFileCustomTag::Terminate),
+            2 => Ok(NewFileCustomTag::NeedCompaction),
+            3 => Ok(NewFileCustomTag::MinLogNumberToKeepHack),
+            4 => Ok(NewFileCustomTag::OldestBlobFileNumber),
+            5 => Ok(NewFileCustomTag::OldestAncesterTime),
+            6 => Ok(NewFileCustomTag::FileCreationTime),
+            7 => Ok(NewFileCustomTag::FileChecksum),
+            8 => Ok(NewFileCustomTag::FileChecksumFuncName),
+            9 => Ok(NewFileCustomTag::Temperature),
+            10 => Ok(NewFileCustomTag::MinTimestamp),
+            11 => Ok(NewFileCustomTag::MaxTimestamp),
+            12 => Ok(NewFileCustomTag::UniqueId),
+            13 => Ok(NewFileCustomTag::EpochNumber),
+            14 => Ok(NewFileCustomTag::CompensateRangeDeletionSize),
+            15 => Ok(NewFileCustomTag::TailSize),
+            16 => Ok(NewFileCustomTag::UserDefinedTimestampsPersisted),
+            _ => Err("Invalid NewFileCustomTag value"),
+        }
+    }
+}
+
+impl From<NewFileCustomTag> for u32 {
+    fn from(tag: NewFileCustomTag) -> u32 {
+        tag as u32
+    }
+}
 #[derive(Debug)]
+#[allow(dead_code)]
 enum VersionEdit {
     Comparator(String),
     LogNumber(u64),
@@ -191,9 +264,10 @@ impl ManifestReader {
     fn read_record(&mut self) -> io::Result<Option<Vec<VersionEdit>>> {
         let mut whole_payload: Vec<u8> = Vec::new();
         loop {
-            let mut left_in_block = BLOCK_SIZE - (self.reader.stream_position().unwrap() % BLOCK_SIZE);
+            let mut left_in_block =
+                BLOCK_SIZE - (self.reader.stream_position().unwrap() % BLOCK_SIZE);
             if left_in_block < HEADER_SIZE {
-                let mut buf = vec!(0u8; left_in_block as usize);
+                let mut buf = vec![0u8; left_in_block as usize];
                 let _ = self.reader.read_exact(&mut buf);
                 left_in_block = BLOCK_SIZE;
             }
@@ -268,30 +342,36 @@ impl ManifestReader {
         // Read all items from the payload
         while cursor.position() < size as u64 {
             let tag = read_varint32(&mut cursor)?;
-            match tag {
-                1 => {
+            match Tag::try_from(tag as u8) {
+                Ok(Tag::Comparator) => {
                     // kComparator
                     let data = read_length_prefixed_slice(&mut cursor)?;
                     let comparator = String::from_utf8(data)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                     edits.push(VersionEdit::Comparator(comparator));
                 }
-                2 => {
+                Ok(Tag::LogNumber) => {
                     // kLogNumber
                     let log_number = read_varint64(&mut cursor)?;
                     edits.push(VersionEdit::LogNumber(log_number));
                 }
-                3 => {
+                Ok(Tag::NextFileNumber) => {
                     // kNextFileNumber
                     let next_file_number = read_varint64(&mut cursor)?;
                     edits.push(VersionEdit::NextFileNumber(next_file_number));
                 }
-                4 => {
+                Ok(Tag::LastSequence) => {
                     // kLastSequence
                     let last_sequence = read_varint64(&mut cursor)?;
                     edits.push(VersionEdit::LastSequence(last_sequence));
                 }
-                103 => {
+                Ok(Tag::NewFile) | Ok(Tag::NewFile2) | Ok(Tag::NewFile3) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("Obsolete tag: {}", tag),
+                    ));
+                }
+                Ok(Tag::NewFile4) => {
                     // kNewFile4
                     let level = read_varint32(&mut cursor)?;
                     let file_number = read_varint64(&mut cursor)?;
@@ -324,8 +404,12 @@ impl ManifestReader {
                         }
 
                         let field_data = read_length_prefixed_slice(&mut cursor)?;
-                        match custom_tag {
-                            2 => {
+                        match NewFileCustomTag::try_from(custom_tag) {
+                            Ok(NewFileCustomTag::Terminate) => {
+                                // kTerminate
+                                break;
+                            }
+                            Ok(NewFileCustomTag::NeedCompaction) => {
                                 // kNeedCompaction
                                 if field_data.len() != 1 {
                                     return Err(io::Error::new(
@@ -335,39 +419,39 @@ impl ManifestReader {
                                 }
                                 meta.needs_compaction = field_data[0] == 1;
                             }
-                            3 => {
+                            Ok(NewFileCustomTag::MinLogNumberToKeepHack) => {
                                 // kMinLogNumberToKeepHack
                                 let mut field_cursor = Cursor::new(field_data);
                                 meta.min_log_number_to_keep =
                                     Some(field_cursor.read_u64::<LittleEndian>()?);
                             }
-                            4 => {
+                            Ok(NewFileCustomTag::OldestBlobFileNumber) => {
                                 // kOldestBlobFileNumber
                                 let mut field_cursor = Cursor::new(field_data);
                                 meta.oldest_blob_file_number =
                                     Some(read_varint64(&mut field_cursor)?);
                             }
-                            5 => {
+                            Ok(NewFileCustomTag::OldestAncesterTime) => {
                                 // kOldestAncesterTime
                                 let mut field_cursor = Cursor::new(field_data);
                                 meta.oldest_ancester_time = read_varint64(&mut field_cursor)?;
                             }
-                            6 => {
+                            Ok(NewFileCustomTag::FileCreationTime) => {
                                 // kFileCreationTime
                                 let mut field_cursor = Cursor::new(field_data);
                                 meta.file_creation_time = read_varint64(&mut field_cursor)?;
                             }
-                            7 => {
+                            Ok(NewFileCustomTag::FileChecksum) => {
                                 // kFileChecksum
                                 meta.file_checksum = String::from_utf8(field_data)
                                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                             }
-                            8 => {
+                            Ok(NewFileCustomTag::FileChecksumFuncName) => {
                                 // kFileChecksumFuncName
                                 meta.file_checksum_func_name = String::from_utf8(field_data)
                                     .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                             }
-                            9 => {
+                            Ok(NewFileCustomTag::Temperature) => {
                                 // kTemperature
                                 if field_data.len() != 1 {
                                     return Err(io::Error::new(
@@ -377,27 +461,27 @@ impl ManifestReader {
                                 }
                                 meta.temperature = Some(field_data[0]);
                             }
-                            12 => {
+                            Ok(NewFileCustomTag::UniqueId) => {
                                 // kUniqueId
                                 meta.unique_id = field_data;
                             }
-                            13 => {
+                            Ok(NewFileCustomTag::EpochNumber) => {
                                 // kEpochNumber
                                 let mut field_cursor = Cursor::new(field_data);
                                 meta.epoch_number = read_varint64(&mut field_cursor)?;
                             }
-                            14 => {
+                            Ok(NewFileCustomTag::CompensateRangeDeletionSize) => {
                                 // kCompensatedRangeDeletionSize
                                 let mut field_cursor = Cursor::new(field_data);
                                 meta.compensated_range_deletion_size =
                                     read_varint64(&mut field_cursor)?;
                             }
-                            15 => {
+                            Ok(NewFileCustomTag::TailSize) => {
                                 // kTailSize
                                 let mut field_cursor = Cursor::new(field_data);
                                 meta.tail_size = read_varint64(&mut field_cursor)?;
                             }
-                            16 => {
+                            Ok(NewFileCustomTag::UserDefinedTimestampsPersisted) => {
                                 // kUserDefinedTimestampsPersisted
                                 if field_data.len() != 1 {
                                     return Err(io::Error::new(
@@ -407,12 +491,21 @@ impl ManifestReader {
                                 }
                                 meta.user_defined_timestamps_persisted = field_data[0] == 1;
                             }
-                            _ => {
+                            Ok(NewFileCustomTag::MinTimestamp) => {
+                                meta.min_timestamp = Some(field_data);
+                            }
+                            Ok(NewFileCustomTag::MaxTimestamp) => {
+                                meta.max_timestamp = Some(field_data);
+                            }
+                            Err(err) => {
                                 if (custom_tag & 0x40) != 0 {
                                     // kCustomTagNonSafeIgnoreMask
                                     return Err(io::Error::new(
                                         io::ErrorKind::InvalidData,
-                                        "new-file4 custom field not supported",
+                                        format!(
+                                            "new-file4 custom field not supported: {} {}",
+                                            custom_tag, err
+                                        ),
                                     ));
                                 }
                                 // Safe to ignore this tag
@@ -421,35 +514,35 @@ impl ManifestReader {
                     }
                     edits.push(VersionEdit::NewFile4(meta));
                 }
-                200 => {
+                Ok(Tag::ColumnFamily) => {
                     // kColumnFamily
                     let column_family = read_varint32(&mut cursor)?;
                     edits.push(VersionEdit::ColumnFamily(column_family));
                 }
-                201 => {
+                Ok(Tag::ColumnFamilyAdd) => {
                     // kColumnFamilyAdd
                     let data = read_length_prefixed_slice(&mut cursor)?;
                     let column_family_name = String::from_utf8(data)
                         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
                     edits.push(VersionEdit::ColumnFamilyAdd(column_family_name));
                 }
-                9 => {
+                Ok(Tag::PrevLogNumber) => {
                     // kPrevLogNumber
                     let prev_log_number = read_varint64(&mut cursor)?;
                     edits.push(VersionEdit::PrevLogNumber(prev_log_number));
                 }
-                203 => {
+                Ok(Tag::MaxColumnFamily) => {
                     // kMaxColumnFamily
                     let max_column_family = read_varint32(&mut cursor)?;
                     edits.push(VersionEdit::MaxColumnFamily(max_column_family));
                 }
-                6 => {
+                Ok(Tag::DeletedFile) => {
                     // kDeletedFile
                     let level = read_varint32(&mut cursor)?;
                     let file_number = read_varint64(&mut cursor)?;
                     edits.push(VersionEdit::DeletedFile(level, file_number));
                 }
-                5 => {
+                Ok(Tag::CompactCursor) => {
                     // kCompactCursor
                     let level = read_varint32(&mut cursor)?;
                     let cursor_data = read_length_prefixed_slice(&mut cursor)?;
@@ -458,20 +551,20 @@ impl ManifestReader {
                         InternalKey { data: cursor_data },
                     ));
                 }
-                10 => {
+                Ok(Tag::MinLogNumberToKeep) => {
                     // kMinLogNumberToKeep
                     let min_log_number = read_varint64(&mut cursor)?;
                     edits.push(VersionEdit::MinLogNumberToKeep(min_log_number));
                 }
-                202 => {
+                Ok(Tag::ColumnFamilyDrop) => {
                     // kColumnFamilyDrop
                     edits.push(VersionEdit::ColumnFamilyDrop);
                 }
                 // ... handle other tags
-                _ => {
+                Err(err) => {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!("Unknown tag: {}", tag),
+                        format!("Unknown tag: {} {}", tag, err),
                     ));
                 }
             }
@@ -488,7 +581,7 @@ fn main() -> io::Result<()> {
 
     let mut reader = ManifestReader::new(manifest_path)?;
 
-    let mut pos : u64 = 0;
+    let mut pos: u64 = 0;
     while let Some(edit) = reader.read_record()? {
         let newpos = reader.position();
         println!("{:x} {:x} {:?}", pos, newpos - pos, edit);
