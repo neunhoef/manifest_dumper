@@ -1,5 +1,7 @@
 use byteorder::{LittleEndian, ReadBytesExt};
 use crc32c::crc32c;
+use std::collections::HashMap;
+use std::fmt;
 use std::fs::File;
 use std::io::{self, BufReader, Cursor, Read, Seek};
 use std::path::Path;
@@ -67,13 +69,30 @@ impl From<Tag> for u8 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct InternalKey {
     data: Vec<u8>, // For now we just store raw bytes
 }
 
-#[derive(Debug)]
+impl fmt::Display for InternalKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.data {
+            write!(f, "{:02x}", byte)?;
+        }
+        write!(f, " ")?;
+        for byte in &self.data {
+            if byte.is_ascii_alphanumeric() {
+                write!(f, "{}", *byte as char)?;
+            } else {
+                write!(f, ".")?;
+            }
+        }
+        write!(f, "")
+    }
+}
+
+#[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct FileMetaData {
     level: u32,
@@ -129,6 +148,74 @@ impl Default for FileMetaData {
             min_timestamp: None,
             max_timestamp: None,
         }
+    }
+}
+
+impl fmt::Display for FileMetaData {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "FileMetaData {{")?;
+        writeln!(f, "  level: {}", self.level)?;
+        writeln!(f, "  file: {}", self.file_number)?;
+        writeln!(f, "  size: {}", self.file_size)?;
+        writeln!(f, "  smallest_key: {}", self.smallest_key)?;
+        writeln!(f, "  largest_key : {}", self.largest_key)?;
+        writeln!(
+            f,
+            "  seqno: {}..{}",
+            self.smallest_seqno, self.largest_seqno
+        )?;
+
+        if self.path_id != 0 {
+            writeln!(f, "  path_id: {}", self.path_id)?;
+        }
+        if self.needs_compaction {
+            writeln!(f, "  needs_compaction: true")?;
+        }
+        if let Some(num) = self.min_log_number_to_keep {
+            writeln!(f, "  min_log_number_to_keep: {}", num)?;
+        }
+        if let Some(num) = self.oldest_blob_file_number {
+            writeln!(f, "  oldest_blob_file: {}", num)?;
+        }
+        if self.oldest_ancester_time != 0 {
+            writeln!(f, "  oldest_ancester_time: {}", self.oldest_ancester_time)?;
+        }
+        if self.file_creation_time != 0 {
+            writeln!(f, "  file_creation_time: {}", self.file_creation_time)?;
+        }
+        if self.epoch_number != 0 {
+            writeln!(f, "  epoch_number: {}", self.epoch_number)?;
+        }
+        if !self.file_checksum.is_empty() {
+            writeln!(f, "  checksum: {}", self.file_checksum)?;
+            writeln!(f, "  checksum_func: {}", self.file_checksum_func_name)?;
+        }
+        if let Some(temp) = self.temperature {
+            writeln!(f, "  temperature: {}", temp)?;
+        }
+        if !self.unique_id.is_empty() {
+            writeln!(f, "  unique_id: {:?}", self.unique_id)?;
+        }
+        if self.compensated_range_deletion_size != 0 {
+            writeln!(
+                f,
+                "  compensated_range_deletion_size: {}",
+                self.compensated_range_deletion_size
+            )?;
+        }
+        if self.tail_size != 0 {
+            writeln!(f, "  tail_size: {}", self.tail_size)?;
+        }
+        if !self.user_defined_timestamps_persisted {
+            writeln!(f, "  user_defined_timestamps_persisted: false")?;
+        }
+        if let Some(ref ts) = self.min_timestamp {
+            writeln!(f, "  min_timestamp: {:?}", ts)?;
+        }
+        if let Some(ref ts) = self.max_timestamp {
+            writeln!(f, "  max_timestamp: {:?}", ts)?;
+        }
+        write!(f, "}}")
     }
 }
 
@@ -581,12 +668,31 @@ fn main() -> io::Result<()> {
 
     let mut reader = ManifestReader::new(manifest_path)?;
 
+    let mut files: HashMap<u64, FileMetaData> = HashMap::new();
+
     let mut pos: u64 = 0;
     while let Some(edit) = reader.read_record()? {
         let newpos = reader.position();
         println!("{:x} {:x} {:?}", pos, newpos - pos, edit);
         pos = newpos;
+
+        for e in &edit {
+            match e {
+                VersionEdit::NewFile4(meta) => {
+                    files.insert(meta.file_number, meta.clone());
+                }
+                VersionEdit::DeletedFile(_level, file_number) => {
+                    files.remove(&file_number);
+                }
+                _ => {}
+            }
+        }
     }
 
+    // Now print out the list of files:
+    println!("List of data files:");
+    for (_nr, meta) in files {
+        println!("{}", meta);
+    }
     Ok(())
 }
