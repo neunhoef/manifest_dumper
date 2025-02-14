@@ -120,6 +120,7 @@ struct FileMetaData {
     user_defined_timestamps_persisted: bool,
     min_timestamp: Option<Vec<u8>>, // Store as raw bytes
     max_timestamp: Option<Vec<u8>>, // Store as raw bytes
+    deleted: bool,
 }
 
 impl Default for FileMetaData {
@@ -148,6 +149,7 @@ impl Default for FileMetaData {
             user_defined_timestamps_persisted: true, // Default is true
             min_timestamp: None,
             max_timestamp: None,
+            deleted: false,
         }
     }
 }
@@ -229,6 +231,9 @@ impl fmt::Display for FileMetaData {
         }
         if let Some(ref ts) = self.max_timestamp {
             writeln!(f, "  max_timestamp: {:?}", ts)?;
+        }
+        if self.deleted {
+            writeln!(f, "  deleted: true")?;
         }
         write!(f, "}}")
     }
@@ -697,7 +702,15 @@ fn main() -> io::Result<()> {
                     files.insert(meta.file_number, meta.clone());
                 }
                 VersionEdit::DeletedFile(_level, file_number) => {
-                    files.remove(&file_number);
+                    let file = files.get_mut(&file_number);
+                    match file {
+                        Some(meta) => {
+                            meta.deleted = true;
+                        }
+                        None => {
+                            println!("File {} not found for deletion", file_number);
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -706,8 +719,13 @@ fn main() -> io::Result<()> {
 
     // Now print out the list of files:
     println!("List of data files:");
+    let mut v : Vec<FileMetaData> = Vec::with_capacity(files.len());
     for (_nr, meta) in files {
-        println!("{}", meta);
+        v.push(meta.clone());
+    }
+    v.sort_by(|a, b| a.file_number.cmp(&b.file_number));
+    for (i, meta) in v.iter().enumerate() {
+        println!("File #{}: {}", i, meta);
     }
     Ok(())
 }
