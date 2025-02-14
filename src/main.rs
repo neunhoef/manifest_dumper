@@ -1,4 +1,5 @@
 use byteorder::{LittleEndian, ReadBytesExt};
+use chrono::{DateTime, TimeZone, Utc};
 use crc32c::crc32c;
 use std::collections::HashMap;
 use std::fmt;
@@ -178,10 +179,24 @@ impl fmt::Display for FileMetaData {
             writeln!(f, "  oldest_blob_file: {}", num)?;
         }
         if self.oldest_ancester_time != 0 {
-            writeln!(f, "  oldest_ancester_time: {}", self.oldest_ancester_time)?;
+            let dt: DateTime<Utc> = Utc
+                .timestamp_opt(self.oldest_ancester_time as i64, 0)
+                .unwrap();
+            writeln!(
+                f,
+                "  oldest_ancester_time: {}",
+                dt.format("%Y-%m-%d %H:%M:%S UTC")
+            )?;
         }
         if self.file_creation_time != 0 {
-            writeln!(f, "  file_creation_time: {}", self.file_creation_time)?;
+            let dt: DateTime<Utc> = Utc
+                .timestamp_opt(self.file_creation_time as i64, 0)
+                .unwrap();
+            writeln!(
+                f,
+                "  file_creation_time: {}",
+                dt.format("%Y-%m-%d %H:%M:%S UTC")
+            )?;
         }
         if self.epoch_number != 0 {
             writeln!(f, "  epoch_number: {}", self.epoch_number)?;
