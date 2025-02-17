@@ -308,6 +308,54 @@ enum VersionEdit {
                       // ... other variants as needed
 }
 
+impl fmt::Display for VersionEdit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            VersionEdit::Comparator(name) => {
+                write!(f, "Comparator: {}", name)
+            }
+            VersionEdit::LogNumber(num) => {
+                write!(f, "LogNumber: {}", num)
+            }
+            VersionEdit::NextFileNumber(num) => {
+                write!(f, "NextFileNumber: {}", num)
+            }
+            VersionEdit::LastSequence(seq) => {
+                write!(f, "LastSequence: {}", seq)
+            }
+            VersionEdit::NewFile4(meta) => {
+                writeln!(f, "NewFile4 {{")?;
+                write!(f, "{}", meta)?;
+                write!(f, "}}")
+            }
+            VersionEdit::ColumnFamily(id) => {
+                write!(f, "ColumnFamily: {}", id)
+            }
+            VersionEdit::ColumnFamilyAdd(name) => {
+                write!(f, "ColumnFamilyAdd: {}", name)
+            }
+            VersionEdit::PrevLogNumber(num) => {
+                write!(f, "PrevLogNumber: {}", num)
+            }
+            VersionEdit::MaxColumnFamily(num) => {
+                write!(f, "MaxColumnFamily: {}", num)
+            }
+            VersionEdit::DeletedFile(level, file_number) => {
+                write!(f, "DeletedFile: level {} file {}", level, file_number)
+            }
+            VersionEdit::CompactCursor(level, key) => {
+                write!(f, "CompactCursor: level {} key {}", level, key)
+            }
+            VersionEdit::MinLogNumberToKeep(num) => {
+                write!(f, "MinLogNumberToKeep: {}", num)
+            }
+            VersionEdit::ColumnFamilyDrop => {
+                write!(f, "ColumnFamilyDrop")
+            }
+        }
+    }
+}
+
 struct ManifestReader {
     reader: BufReader<File>,
 }
@@ -681,6 +729,116 @@ impl ManifestReader {
     }
 }
 
+struct CompactionInfo {
+    start_position: usize,  // Position in all_edits where this compaction starts
+    prev_log_number: u64,
+    next_file_number: u64,
+    last_sequence: u64,
+    deleted_files: Vec<(u32, u64)>,  // (level, file_number)
+    new_files: Vec<FileMetaData>,
+    column_family: u32,
+}
+
+impl fmt::Display for CompactionInfo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(f, "Compaction at position {} {{", self.start_position)?;
+        writeln!(f, "  PrevLogNumber: {}", self.prev_log_number)?;
+        writeln!(f, "  NextFileNumber: {}", self.next_file_number)?;
+        writeln!(f, "  LastSequence: {}", self.last_sequence)?;
+        writeln!(f, "  Deleted files:")?;
+        for (level, file) in &self.deleted_files {
+            writeln!(f, "    Level {}: File {}", level, file)?;
+        }
+        writeln!(f, "  New files:")?;
+        for file in &self.new_files {
+            writeln!(f, "    {}", file)?;
+        }
+        writeln!(f, "  ColumnFamily: {}", self.column_family)?;
+        write!(f, "}}")
+    }
+}
+
+fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
+    let mut compactions = Vec::new();
+    
+    for (position, edits) in all_edits.iter().enumerate() {
+        // Need at least 4 edits for a minimal compaction pattern
+        if edits.len() < 4 {
+            continue;
+        }
+        
+        // Check if this could be the start of a compaction pattern
+        let mut iter = edits.iter().enumerate();
+        
+        // Try to match the pattern
+        let mut current_compaction = None;
+        
+        while let Some((i, edit)) = iter.next() {
+            match edit {
+                // Start of potential compaction pattern
+                VersionEdit::PrevLogNumber(log_num) => {
+                    // Look ahead for required sequence
+                    if let Some(next_file) = edits.get(i + 1) {
+                        if let Some(last_seq) = edits.get(i + 2) {
+                            match (next_file, last_seq) {
+                                (
+                                    VersionEdit::NextFileNumber(next_num),
+                                    VersionEdit::LastSequence(seq)
+                                ) => {
+                                    current_compaction = Some(CompactionInfo {
+                                        start_position: position,
+                                        prev_log_number: *log_num,
+                                        next_file_number: *next_num,
+                                        last_sequence: *seq,
+                                        deleted_files: Vec::new(),
+                                        new_files: Vec::new(),
+                                        column_family: 0, // Will be set later
+                                    });
+                                    // Skip the next two entries as we've processed them
+                                    iter.next();
+                                    iter.next();
+                                }
+                                _ => {
+                                    current_compaction = None;
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Collect deleted files if we're in a compaction
+                VersionEdit::DeletedFile(level, file_num) => {
+                    if let Some(ref mut compaction) = current_compaction {
+                        compaction.deleted_files.push((*level, *file_num));
+                    }
+                }
+                
+                // Collect new files if we're in a compaction
+                VersionEdit::NewFile4(meta) => {
+                    if let Some(ref mut compaction) = current_compaction {
+                        compaction.new_files.push(meta.clone());
+                    }
+                }
+                
+                // End of compaction pattern
+                VersionEdit::ColumnFamily(cf_id) => {
+                    if let Some(mut compaction) = current_compaction.take() {
+                        compaction.column_family = *cf_id;
+                        // Validate that this looks like a real compaction
+                        if !compaction.deleted_files.is_empty() && !compaction.new_files.is_empty() {
+                            compactions.push(compaction);
+                        }
+                    }
+                }
+                
+                _ => {}
+            }
+        }
+    }
+    
+    compactions
+}
+
 fn main() -> io::Result<()> {
     let manifest_path = std::env::args()
         .nth(1)
@@ -691,12 +849,14 @@ fn main() -> io::Result<()> {
     let mut files: HashMap<u64, FileMetaData> = HashMap::new();
 
     let mut pos: u64 = 0;
+    let mut all_edits : Vec<Vec<VersionEdit>> = Vec::new();
     while let Some(edit) = reader.read_record()? {
         let newpos = reader.position();
-        println!("{:x} {:x} {:?}", pos, newpos - pos, edit);
+        println!("New edits: {:x} {:x}", pos, newpos - pos);
         pos = newpos;
 
         for e in &edit {
+            println!("  {}", e);
             match e {
                 VersionEdit::NewFile4(meta) => {
                     files.insert(meta.file_number, meta.clone());
@@ -715,6 +875,7 @@ fn main() -> io::Result<()> {
                 _ => {}
             }
         }
+        all_edits.push(edit);
     }
 
     // Now print out the list of files:
@@ -727,5 +888,14 @@ fn main() -> io::Result<()> {
     for (i, meta) in v.iter().enumerate() {
         println!("File #{}: {}", i, meta);
     }
+    // Find and print compactions:
+    let compactions = find_compactions(&all_edits);
+    println!("\nFound {} potential compactions:", compactions.len());
+    for (i, compaction) in compactions.iter().enumerate() {
+        println!("\nCompaction #{}", i + 1);
+        println!("{}", compaction);
+    }
     Ok(())
 }
+
+// Add this to your main function:
