@@ -837,7 +837,7 @@ fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
                                 compaction.only_deletes = true;
                             }
                         }
-                        if !compaction.deleted_files.is_empty() && !compaction.new_files.is_empty() {
+                        if !compaction.deleted_files.is_empty() || !compaction.new_files.is_empty() {
                             compactions.push(compaction);
                         }
                     }
@@ -864,6 +864,7 @@ fn main() -> io::Result<()> {
     let mut all_edits : Vec<Vec<VersionEdit>> = Vec::new();
     while let Some(edit) = reader.read_record()? {
         let newpos = reader.position();
+        println!("---------------------------------------------------");
         println!("New edits: {:x} {:x}", pos, newpos - pos);
         pos = newpos;
 
