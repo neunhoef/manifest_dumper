@@ -730,14 +730,13 @@ impl ManifestReader {
 }
 
 struct CompactionInfo {
-    start_position: usize,  // Position in all_edits where this compaction starts
+    start_position: usize, // Position in all_edits where this compaction starts
     prev_log_number: u64,
     next_file_number: u64,
     last_sequence: u64,
-    deleted_files: Vec<(u32, u64)>,  // (level, file_number)
+    deleted_files: Vec<(u32, u64)>, // (level, file_number)
     new_files: Vec<FileMetaData>,
     column_family: u32,
-    interesting: bool,
     only_deletes: bool,
 }
 
@@ -756,7 +755,6 @@ impl fmt::Display for CompactionInfo {
             writeln!(f, "    {}", file)?;
         }
         writeln!(f, "  ColumnFamily: {}", self.column_family)?;
-        writeln!(f, "  Interesting: {}", self.interesting)?;
         writeln!(f, "  Only deletes: {}", self.only_deletes)?;
         write!(f, "}}")
     }
@@ -764,19 +762,19 @@ impl fmt::Display for CompactionInfo {
 
 fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
     let mut compactions = Vec::new();
-    
+
     for (position, edits) in all_edits.iter().enumerate() {
         // Need at least 4 edits for a minimal compaction pattern
         if edits.len() < 4 {
             continue;
         }
-        
+
         // Check if this could be the start of a compaction pattern
         let mut iter = edits.iter().enumerate();
-        
+
         // Try to match the pattern
         let mut current_compaction = None;
-        
+
         while let Some((i, edit)) = iter.next() {
             match edit {
                 // Start of potential compaction pattern
@@ -787,7 +785,7 @@ fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
                             match (next_file, last_seq) {
                                 (
                                     VersionEdit::NextFileNumber(next_num),
-                                    VersionEdit::LastSequence(seq)
+                                    VersionEdit::LastSequence(seq),
                                 ) => {
                                     current_compaction = Some(CompactionInfo {
                                         start_position: position,
@@ -797,7 +795,6 @@ fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
                                         deleted_files: Vec::new(),
                                         new_files: Vec::new(),
                                         column_family: 0, // Will be set later
-                                        interesting: false,
                                         only_deletes: false,
                                     });
                                     // Skip the next two entries as we've processed them
@@ -811,43 +808,41 @@ fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
                         }
                     }
                 }
-                
+
                 // Collect deleted files if we're in a compaction
                 VersionEdit::DeletedFile(level, file_num) => {
                     if let Some(ref mut compaction) = current_compaction {
                         compaction.deleted_files.push((*level, *file_num));
                     }
                 }
-                
+
                 // Collect new files if we're in a compaction
                 VersionEdit::NewFile4(meta) => {
                     if let Some(ref mut compaction) = current_compaction {
                         compaction.new_files.push(meta.clone());
                     }
                 }
-                
+
                 // End of compaction pattern
                 VersionEdit::ColumnFamily(cf_id) => {
                     if let Some(mut compaction) = current_compaction.take() {
                         compaction.column_family = *cf_id;
                         // Validate that this looks like a real compaction
-                        if compaction.column_family == 10 {
-                            compaction.interesting = true;
-                            if compaction.new_files.is_empty() {
-                                compaction.only_deletes = true;
-                            }
+                        if compaction.new_files.is_empty() {
+                            compaction.only_deletes = true;
                         }
-                        if !compaction.deleted_files.is_empty() || !compaction.new_files.is_empty() {
+                        if !compaction.deleted_files.is_empty() || !compaction.new_files.is_empty()
+                        {
                             compactions.push(compaction);
                         }
                     }
                 }
-                
+
                 _ => {}
             }
         }
     }
-    
+
     compactions
 }
 
@@ -861,7 +856,7 @@ fn main() -> io::Result<()> {
     let mut files: HashMap<u64, FileMetaData> = HashMap::new();
 
     let mut pos: u64 = 0;
-    let mut all_edits : Vec<Vec<VersionEdit>> = Vec::new();
+    let mut all_edits: Vec<Vec<VersionEdit>> = Vec::new();
     while let Some(edit) = reader.read_record()? {
         let newpos = reader.position();
         println!("---------------------------------------------------");
@@ -893,13 +888,19 @@ fn main() -> io::Result<()> {
 
     // Now print out the list of files:
     println!("List of data files:");
-    let mut v : Vec<FileMetaData> = Vec::with_capacity(files.len());
-    for (_nr, meta) in files {
+    let mut v: Vec<FileMetaData> = Vec::with_capacity(files.len());
+    for (_nr, meta) in &files {
         v.push(meta.clone());
     }
     v.sort_by(|a, b| a.file_number.cmp(&b.file_number));
     for (i, meta) in v.iter().enumerate() {
         println!("File #{}: {}", i, meta);
+    }
+    println!("List of interesting files:");
+    for (i, meta) in v.iter().enumerate() {
+        if meta.file_size < 2000 && meta.level == 0 {
+            println!("Interesting file #{}: {}", i, meta);
+        }
     }
     // Find and print compactions:
     let compactions = find_compactions(&all_edits);
@@ -907,6 +908,25 @@ fn main() -> io::Result<()> {
     for (i, compaction) in compactions.iter().enumerate() {
         println!("\nCompaction #{}", i + 1);
         println!("{}", compaction);
+    }
+    // Print interesting compactions (column family 10, only deletes, only
+    // small files < 2000):
+    for (i, compaction) in compactions.iter().enumerate() {
+        if compaction.column_family == 10 && compaction.only_deletes == true {
+            let mut all_small = true;
+            for d in compaction.deleted_files.iter() {
+                let file = files.get(&d.1);
+                if let Some(f) = file {
+                    if f.file_size > 2000 {
+                        all_small = true;
+                        break;
+                    }
+                }
+            }
+            if all_small {
+                println!("Interesting delete #{}: {}", i, compaction);
+            }
+        }
     }
     Ok(())
 }
