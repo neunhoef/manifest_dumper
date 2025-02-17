@@ -737,6 +737,8 @@ struct CompactionInfo {
     deleted_files: Vec<(u32, u64)>,  // (level, file_number)
     new_files: Vec<FileMetaData>,
     column_family: u32,
+    interesting: bool,
+    only_deletes: bool,
 }
 
 impl fmt::Display for CompactionInfo {
@@ -754,6 +756,8 @@ impl fmt::Display for CompactionInfo {
             writeln!(f, "    {}", file)?;
         }
         writeln!(f, "  ColumnFamily: {}", self.column_family)?;
+        writeln!(f, "  Interesting: {}", self.interesting)?;
+        writeln!(f, "  Only deletes: {}", self.only_deletes)?;
         write!(f, "}}")
     }
 }
@@ -793,6 +797,8 @@ fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
                                         deleted_files: Vec::new(),
                                         new_files: Vec::new(),
                                         column_family: 0, // Will be set later
+                                        interesting: false,
+                                        only_deletes: false,
                                     });
                                     // Skip the next two entries as we've processed them
                                     iter.next();
@@ -825,6 +831,12 @@ fn find_compactions(all_edits: &Vec<Vec<VersionEdit>>) -> Vec<CompactionInfo> {
                     if let Some(mut compaction) = current_compaction.take() {
                         compaction.column_family = *cf_id;
                         // Validate that this looks like a real compaction
+                        if compaction.column_family == 10 {
+                            compaction.interesting = true;
+                            if compaction.new_files.is_empty() {
+                                compaction.only_deletes = true;
+                            }
+                        }
                         if !compaction.deleted_files.is_empty() && !compaction.new_files.is_empty() {
                             compactions.push(compaction);
                         }
