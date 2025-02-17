@@ -857,6 +857,7 @@ fn main() -> io::Result<()> {
 
     let mut pos: u64 = 0;
     let mut all_edits: Vec<Vec<VersionEdit>> = Vec::new();
+    let mut total_size: u64 = 0;
     while let Some(edit) = reader.read_record()? {
         let newpos = reader.position();
         println!("---------------------------------------------------");
@@ -868,12 +869,14 @@ fn main() -> io::Result<()> {
             match e {
                 VersionEdit::NewFile4(meta) => {
                     files.insert(meta.file_number, meta.clone());
+                    total_size += meta.file_size;
                 }
                 VersionEdit::DeletedFile(_level, file_number) => {
                     let file = files.get_mut(&file_number);
                     match file {
                         Some(meta) => {
                             meta.deleted = true;
+                            total_size -= meta.file_size;
                         }
                         None => {
                             println!("File {} not found for deletion", file_number);
@@ -883,10 +886,12 @@ fn main() -> io::Result<()> {
                 _ => {}
             }
         }
+        println!("New total size: {}", total_size);
         all_edits.push(edit);
     }
 
     // Now print out the list of files:
+    println!("============================================");
     println!("List of data files:");
     let mut v: Vec<FileMetaData> = Vec::with_capacity(files.len());
     for (_nr, meta) in &files {
@@ -896,6 +901,14 @@ fn main() -> io::Result<()> {
     for (i, meta) in v.iter().enumerate() {
         println!("File #{}: {}", i, meta);
     }
+    println!("============================================");
+    println!("List of alive files:");
+    for (i, meta) in v.iter().enumerate() {
+        if !meta.deleted {
+            println!("Alive file #{}: {}", i, meta);
+        }
+    }
+    println!("============================================");
     println!("List of interesting files:");
     for (i, meta) in v.iter().enumerate() {
         if meta.file_size < 2000 && meta.level == 0 {
@@ -904,6 +917,7 @@ fn main() -> io::Result<()> {
     }
     // Find and print compactions:
     let compactions = find_compactions(&all_edits);
+    println!("============================================");
     println!("\nFound {} potential compactions:", compactions.len());
     for (i, compaction) in compactions.iter().enumerate() {
         println!("\nCompaction #{}", i + 1);
